@@ -62,6 +62,21 @@ async function telegram(text) {
   if (!r.ok) throw new Error(`Telegram ${r.status}: ${await r.text()}`);
 }
 
+// Facebook: solo publica si existen FACEBOOK_PAGE_ID y FACEBOOK_PAGE_TOKEN
+async function facebook(p) {
+  const { FACEBOOK_PAGE_ID, FACEBOOK_PAGE_TOKEN } = process.env;
+  if (!FACEBOOK_PAGE_ID || !FACEBOOK_PAGE_TOKEN) return "omitido (faltan variables)";
+  const body = new URLSearchParams({
+    message: `📌 ${p.title}\n\n${p.desc ? p.desc + "\n\n" : ""}🇯🇵 Latinos en Japón · 日本のラテン系コミュニティ`,
+    link: p.url,
+    access_token: FACEBOOK_PAGE_TOKEN,
+  });
+  const r = await fetch(`https://graph.facebook.com/v26.0/${FACEBOOK_PAGE_ID}/feed`, { method: "POST", body });
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(`Facebook ${r.status}: ${JSON.stringify(j.error || j)}`);
+  return "ok";
+}
+
 function format(p) {
   return `📌 ${p.title}\n\n${p.desc ? p.desc + "\n\n" : ""}👉 ${p.url}\n\n🇯🇵 Latinos en Japón · 日本のラテン系コミュニティ`;
 }
@@ -83,7 +98,12 @@ export async function run({ dry = false, send = true, mark = true } = {}) {
 
   if (dry) return { paginasEncontradas: all.length, pendientes: candidates.length, siguiente: page, mensaje: format(page) };
 
-  if (send) await telegram(format(page));
-  if (mark) await store.setJSON("posted", [...posted, url]);
-  return { publicado: page.url, titulo: page.title, paginasEncontradas: all.length };
+  const resultado = {};
+  if (send) {
+    try { await telegram(format(page)); resultado.telegram = "ok"; } catch (e) { resultado.telegram = String(e); }
+    try { resultado.facebook = await facebook(page); } catch (e) { resultado.facebook = String(e); }
+  }
+  const algunoOk = resultado.telegram === "ok" || resultado.facebook === "ok";
+  if (mark && (algunoOk || !send)) await store.setJSON("posted", [...posted, url]);
+  return { publicado: page.url, titulo: page.title, paginasEncontradas: all.length, ...resultado };
 }
