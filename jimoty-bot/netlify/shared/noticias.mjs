@@ -21,10 +21,17 @@ const KEYWORDS = [
   [2, "minimum wage"], [2, "pension"], [2, "health insurance"], [2, "my number"], [2, "tax"], [2, "wage"],
   [2, "地震"], [2, "台風"], [2, "津波"], [2, "防災"], [2, "earthquake"], [2, "typhoon"], [2, "tsunami"],
   [1, "物価"], [1, "円安"], [1, "円高"], [1, "inflation"], [1, "yen"], [1, "labor"], [1, "workers"], [1, "housing"],
+  [1, "給与"], [1, "給料"], [1, "雇用"], [1, "労働"], [1, "家賃"], [1, "住宅"], [1, "医療"], [1, "保険料"], [1, "児童手当"], [1, "子育て"], [1, "教育"], [1, "外国"],
+  [1, "salary"], [1, "employment"], [1, "rent"], [1, "childcare"], [1, "school"], [1, "tourist"], [1, "medical"], [1, "japan's economy"],
 ];
 
 // Si el título tiene alguna de estas palabras, se descarta
-const EXCLUDE = ["殺人", "逮捕", "容疑", "死亡事故", "murder", "arrest", "suspect", "stabbing", "killed", "dies"];
+const EXCLUDE = [
+  "殺人", "逮捕", "容疑", "死亡事故", "murder", "arrest", "suspect", "stabbing", "killed", "dies",
+  "trump", "h-1b", "vance", "new york", "white house", "u.s.", "ice agents", "federal immigration", "biden", "ukraine", "gaza",
+];
+// Si la dirección de la noticia contiene esto, se descarta (noticias del mundo, no de Japón)
+const EXCLUDE_URL = ["/category/world/"];
 
 // ========================
 
@@ -50,6 +57,7 @@ async function readFeed(feed) {
 
 function score(item) {
   const text = `${item.title} ${item.desc}`.toLowerCase();
+  if (EXCLUDE_URL.some((u) => item.link.includes(u))) return 0;
   if (EXCLUDE.some((w) => text.includes(w.toLowerCase()))) return 0;
   return KEYWORDS.reduce((s, [w, k]) => s + (text.includes(k.toLowerCase()) ? w : 0), 0);
 }
