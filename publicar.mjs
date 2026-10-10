@@ -1,4 +1,21 @@
 import { getStore } from "@netlify/blobs";
+import { anotar } from "./registro.mjs";
+
+// IDs de lo último publicado (para el panel de estadísticas)
+const ids = {};
+
+// Agrega marcas a los enlaces de tu sitio para ver de qué red llegan las visitas (Google Analytics / Search Console)
+function conUtm(url, red) {
+  try {
+    const u = new URL(url);
+    u.searchParams.set("utm_source", red);
+    u.searchParams.set("utm_medium", "bot");
+    u.searchParams.set("utm_campaign", "guia-diaria");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
 
 const SITE = (process.env.SITE_URL || "https://latinosenjapon.com").replace(/\/$/, "");
 // Si una URL contiene alguna de estas palabras, no se publica
@@ -68,17 +85,37 @@ async function facebook(p) {
   if (!FACEBOOK_PAGE_ID || !FACEBOOK_PAGE_TOKEN) return "omitido (faltan variables)";
   const body = new URLSearchParams({
     message: `📌 ${p.title}\n\n${p.desc ? p.desc + "\n\n" : ""}🇯🇵 Latinos en Japón · 日本のラテン系コミュニティ`,
-    link: p.url,
+    link: conUtm(p.url, "facebook"),
     access_token: FACEBOOK_PAGE_TOKEN,
   });
   const r = await fetch(`https://graph.facebook.com/v26.0/${FACEBOOK_PAGE_ID}/feed`, { method: "POST", body });
   const j = await r.json().catch(() => ({}));
+  ids.facebook = j.id;
   if (!r.ok) throw new Error(`Facebook ${r.status}: ${JSON.stringify(j.error || j)}`);
   return "ok";
 }
 
-function format(p) {
-  return `📌 ${p.title}\n\n${p.desc ? p.desc + "\n\n" : ""}👉 ${p.url}\n\n🇯🇵 Latinos en Japón · 日本のラテン系コミュニティ`;
+// Hilda Social: guarda una publicación nueva en la tabla "posts" de Supabase.
+// Necesita SUPABASE_URL, SUPABASE_SERVICE_KEY y HILDA_BOT_USER_ID (usuario del bot).
+async function hilda(texto) {
+  const { SUPABASE_URL, SUPABASE_SERVICE_KEY, HILDA_BOT_USER_ID } = process.env;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !HILDA_BOT_USER_ID) return "omitido (faltan variables)";
+  const headers = { "Content-Type": "application/json", apikey: SUPABASE_SERVICE_KEY, Prefer: "return=representation" };
+  if (SUPABASE_SERVICE_KEY.startsWith("eyJ")) headers.Authorization = `Bearer ${SUPABASE_SERVICE_KEY}`;
+  const r = await fetch(`${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/posts`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ user_id: HILDA_BOT_USER_ID, content: texto }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error(`Hilda ${r.status}: ${await r.text()}`);
+  const filas = await r.json().catch(() => []);
+  ids.hilda = filas?.[0]?.id;
+  return "ok";
+}
+
+function format(p, red = "web") {
+  return `📌 ${p.title}\n\n${p.desc ? p.desc + "\n\n" : ""}👉 ${conUtm(p.url, red)}\n\n🇯🇵 Latinos en Japón · 日本のラテン系コミュニティ`;
 }
 
 // dry: solo muestra qué publicaría | send: publica | mark: recuerda lo publicado para no repetir
@@ -99,11 +136,14 @@ export async function run({ dry = false, send = true, mark = true } = {}) {
   if (dry) return { paginasEncontradas: all.length, pendientes: candidates.length, siguiente: page, mensaje: format(page) };
 
   const resultado = {};
+  ids.facebook = ids.hilda = undefined;
   if (send) {
-    try { await telegram(format(page)); resultado.telegram = "ok"; } catch (e) { resultado.telegram = String(e); }
+    try { await telegram(format(page, "telegram")); resultado.telegram = "ok"; } catch (e) { resultado.telegram = String(e); }
     try { resultado.facebook = await facebook(page); } catch (e) { resultado.facebook = String(e); }
+    try { resultado.hilda = await hilda(format(page, "hilda")); } catch (e) { resultado.hilda = String(e); }
   }
-  const algunoOk = resultado.telegram === "ok" || resultado.facebook === "ok";
+  const algunoOk = [resultado.telegram, resultado.facebook, resultado.hilda].includes("ok");
+  if (send) await anotar({ tipo: "guía", prueba: !mark, titulo: page.title, url: page.url, telegram: resultado.telegram, facebook_id: ids.facebook || null, hilda_id: ids.hilda || null });
   if (mark && (algunoOk || !send)) await store.setJSON("posted", [...posted, url]);
   return { publicado: page.url, titulo: page.title, paginasEncontradas: all.length, ...resultado };
 }
