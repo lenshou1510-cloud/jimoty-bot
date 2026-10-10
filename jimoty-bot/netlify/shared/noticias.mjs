@@ -1,5 +1,9 @@
 import * as cheerio from "cheerio";
 import { getStore } from "@netlify/blobs";
+import { anotar } from "./registro.mjs";
+
+// IDs de lo último publicado (para el panel de estadísticas)
+const ids = {};
 
 // ====== EDITA AQUÍ ======
 
@@ -36,7 +40,8 @@ const EXCLUDE_URL = ["/category/world/"];
 // ========================
 
 const UA = "Mozilla/5.0 (compatible; LatinosEnJaponBot)";
-const clean = (s = "") => s.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+const clean = (s = "") =>
+  s.replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#39;|&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/\s+/g, " ").trim();
 
 async function readFeed(feed) {
   const r = await fetch(feed.url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(8000) });
@@ -78,7 +83,60 @@ async function facebook(n) {
   const body = new URLSearchParams({ message: format(n), link: n.link, access_token: FACEBOOK_PAGE_TOKEN });
   const r = await fetch(`https://graph.facebook.com/v26.0/${FACEBOOK_PAGE_ID}/feed`, { method: "POST", body });
   const j = await r.json().catch(() => ({}));
+  ids.facebook = j.id;
   if (!r.ok) throw new Error(`Facebook ${r.status}: ${JSON.stringify(j.error || j)}`);
+  return "ok";
+}
+
+// Traduce al español con la API de Claude. Sin ANTHROPIC_API_KEY o si falla, deja la noticia como está.
+async function traducir(n) {
+  const key = process.env.ANTHROPIC_API_KEY;
+  if (!key) return n;
+  try {
+    const r = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+      body: JSON.stringify({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 500,
+        messages: [{
+          role: "user",
+          content:
+            "Traduce al español neutro esta noticia de Japón para una comunidad latina que vive en Japón. " +
+            "No inventes datos ni agregues información. Mantén nombres propios, cifras y fechas. " +
+            "El resumen debe tener máximo 2 oraciones. Si no hay resumen, devuelve resumen vacío. " +
+            'Responde SOLO con JSON: {"titulo":"...","resumen":"..."}\n\n' +
+            `TITULO: ${n.title}\nRESUMEN: ${n.desc}`,
+        }],
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+    const j = await r.json();
+    const txt = (j.content?.[0]?.text || "").replace(/```json|```/g, "").trim();
+    const o = JSON.parse(txt);
+    if (o.titulo) return { ...n, title: o.titulo, desc: o.resumen || "" };
+  } catch (e) {
+    console.log("traducción falló:", String(e));
+  }
+  return n;
+}
+
+// Hilda Social: guarda una publicación nueva en la tabla "posts" de Supabase.
+// Necesita SUPABASE_URL, SUPABASE_SERVICE_KEY y HILDA_BOT_USER_ID (usuario del bot).
+async function hilda(texto) {
+  const { SUPABASE_URL, SUPABASE_SERVICE_KEY, HILDA_BOT_USER_ID } = process.env;
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !HILDA_BOT_USER_ID) return "omitido (faltan variables)";
+  const headers = { "Content-Type": "application/json", apikey: SUPABASE_SERVICE_KEY, Prefer: "return=representation" };
+  if (SUPABASE_SERVICE_KEY.startsWith("eyJ")) headers.Authorization = `Bearer ${SUPABASE_SERVICE_KEY}`;
+  const r = await fetch(`${SUPABASE_URL.replace(/\/$/, "")}/rest/v1/posts`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ user_id: HILDA_BOT_USER_ID, content: texto }),
+    signal: AbortSignal.timeout(10000),
+  });
+  if (!r.ok) throw new Error(`Hilda ${r.status}: ${await r.text()}`);
+  const filas = await r.json().catch(() => []);
+  ids.hilda = filas?.[0]?.id;
   return "ok";
 }
 
@@ -108,16 +166,22 @@ export async function run({ dry = false, send = true, mark = true } = {}) {
     .filter((n) => n.puntos > 0)
     .sort((a, b) => b.puntos - a.puntos || (b.date || 0) - (a.date || 0));
 
-  if (dry) return { fuentes: feeds, totalLeidas: all.length, relevantes: candidates.length, top: candidates.slice(0, 5) };
+  if (dry) {
+    const prueba = candidates[0] ? await traducir(candidates[0]) : null;
+    return { fuentes: feeds, totalLeidas: all.length, relevantes: candidates.length, traduccionPrueba: prueba && { titulo: prueba.title, resumen: prueba.desc }, top: candidates.slice(0, 5) };
+  }
   if (!candidates.length) return { fuentes: feeds, resultado: "Sin noticias relevantes nuevas; no se publicó nada." };
 
-  const n = candidates[0];
+  const n = await traducir(candidates[0]);
   const resultado = {};
+  ids.facebook = ids.hilda = undefined;
   if (send) {
     try { await telegram(format(n)); resultado.telegram = "ok"; } catch (e) { resultado.telegram = String(e); }
     try { resultado.facebook = await facebook(n); } catch (e) { resultado.facebook = String(e); }
+    try { resultado.hilda = await hilda(format(n)); } catch (e) { resultado.hilda = String(e); }
   }
-  const ok = resultado.telegram === "ok" || resultado.facebook === "ok";
+  const ok = [resultado.telegram, resultado.facebook, resultado.hilda].includes("ok");
+  if (send) await anotar({ tipo: "noticia", prueba: !mark, titulo: n.title, url: n.link, telegram: resultado.telegram, facebook_id: ids.facebook || null, hilda_id: ids.hilda || null });
   if (mark && ok) await store.setJSON("posted", [...posted, n.link].slice(-1000));
   return { publicado: n.link, titulo: n.title, puntos: n.puntos, fuentes: feeds, ...resultado };
 }
